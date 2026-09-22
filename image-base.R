@@ -7,12 +7,15 @@ if(!require(ggplot2)){install.packages("ggplot2")}
 if(!require(dplyr)){install.packages("dplyr")}
 if(!require(lme4)){install.packages("lme4")}
 if(!require(glmmTMB)){install.packages("glmmTMB")}
+if(!require(SimplyAgree)){install.packages("SimplyAgree")}
 
 library(lubridate)
 library(ggplot2)
 library(dplyr)
 library(lme4)
 library(glmmTMB)
+library(SimplyAgree)
+
 
 ##-----------------------------------------------------
 ## Read data into R
@@ -225,3 +228,43 @@ new.dat$pred <- predict(model.no.season,
                         newdata = new.dat,
                         type = "response",
                         re.form = NA)
+
+##--------------------------------------------------
+## Height ground vs uav derived
+##--------------------------------------------------
+height.dat <- master.data %>%
+  filter(time.detected == 2)
+
+plot(height.dat$ground.height, height.dat$derived.height)
+
+height.dat <-height.dat %>%
+  mutate(error = derived.height - ground.height)
+
+summary_error <- height.dat %>%
+  group_by(days.after) %>%
+  summarise(mae = mean(abs(error)),
+            rmse = sqrt(mean(error^2)),
+            mape <- mean(abs(error / ground.height)) * 100)
+
+summary_error.bysp <- height.dat %>%
+  group_by(sp) %>%
+  summarise(mae = mean(abs(error)),
+            rmse = sqrt(mean(error^2)),
+            mape <- mean(abs(error / ground.height)) * 100)
+
+print(summary_error.bysp, n = 30)
+
+
+##-------------------------------------------------
+## limit of agreement
+##-------------------------------------------------
+agreement <- agreement_limit(data = height.dat,
+                     x = "ground.height",
+                     y = "derived.height")
+
+repeated <- agreement_limit(
+                    x ="ground.height",
+                     y = "derived.height",
+                     id = "id",
+                     data = height.dat,
+                     data_type = "nest")
