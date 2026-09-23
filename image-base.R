@@ -8,6 +8,8 @@ if(!require(dplyr)){install.packages("dplyr")}
 if(!require(lme4)){install.packages("lme4")}
 if(!require(glmmTMB)){install.packages("glmmTMB")}
 if(!require(SimplyAgree)){install.packages("SimplyAgree")}
+if(!require(DHARMa)){install.packages("DHARMa")}
+
 
 library(lubridate)
 library(ggplot2)
@@ -15,6 +17,7 @@ library(dplyr)
 library(lme4)
 library(glmmTMB)
 library(SimplyAgree)
+library(DHARMa)
 
 ##-----------------------------------------------------
 ## Read data into R
@@ -132,19 +135,75 @@ plot(master.clean$image.detected ~ master.clean$ca.d)
 ##-------------------------------------------------
 library(glmmTMB)
 model.full.tmb <- glmmTMB(
-  image.detected ~ scale(ground.height) + sp + season + (1 |bench/id),
+  image.detected ~ scale(ground.height) + sp * season +
+    (1 |bench/id),
   data = master.clean,
   family = binomial
 )
 summary(model.full.tmb)
 
-model.no.season <- update(model.full.tmb, . ~ . - season)
-model.no.sp <- update(model.full.tmb, . ~ . - sp)
-model.no.height <- update(model.full.tmb, . ~ . - scale(ground.height))
-AIC(model.full.tmb, model.no.season, model.no.sp, model.no.height)
+model.full.nointer <- glmmTMB(
+  image.detected ~ scale(ground.height) + sp + season +
+    (1 |bench/id),
+  data = master.clean,
+  family = binomial
+)
+model.no.season <- update(model.full.nointer, . ~ . - season)
+model.no.sp <- update(model.full.nointer, . ~ . - sp)
+model.no.height <- update(model.full.nointer, . ~ . - scale(ground.height))
+model.height <- glmmTMB(
+  image.detected ~ scale(ground.height) +
+    (1 |bench/id),
+  data = master.clean,
+  family = binomial
+)
+model.random <- glmmTMB(
+  image.detected ~ 1 +
+    (1 |bench/id),
+  data = master.clean,
+  family = binomial
+)
+
+AIC(model.full.tmb, model.full.nointer, model.no.season, model.no.sp,
+    model.no.height, model.height, model.random)
+anova(model.full.tmb, model.full.nointer)
 
 ##best model has height, season, and species.
+## check overdispersion
+overdisp <- sum(residuals(model.full.nointer, type = "pearson")^2) /
+  df.residual(model.full.nointer)
+cat("Overdispersion ratio:", round(overdisp, 2), "\n")
+## overdispesion ration = 0.9 no problem
 
+
+## model validation
+plot(fitted(model.full.nointer), resid(model.full.nointer),
+     xlab = "Fitted values", ylab = "Residuals",
+     main = "(A) Residuals vs Fitted",
+     pch = 16, col = "steelblue", cex = 0.6)
+abline(h = 0, lty = 2, col = "red")
+
+qqnorm(resid(model.full.nointer), main = "(B) Q-Q Plot of Residuals",
+       pch = 16, col = "steelblue", cex = 0.6)
+qqline(resid(model.full.nointer), col = "red", lty = 2)
+
+# Simulate and plot residuals DHARMa package
+res <- simulateResiduals(model.full.nointer)
+plot(res)
+
+testDispersion(res)
+testZeroInflation(res)
+
+pearson.res <- residuals(model.full.nointer, type = "dunn-smyth") #OK
+
+# Plot manually
+plot(fitted(model.full.nointer), pearson.res,
+     xlab = "Fitted values", ylab = "Pearson residuals")
+abline(h = 0, col = "red")
+
+# Incidence rate ratios
+exp(fixef(model.full.nointer)$cond)
+When the height increased by 1 unit the
 ##---------------------------------------------------
 ## Model prediction
 ##---------------------------------------------------
@@ -154,16 +213,48 @@ new.dat <- expand.grid(
   ground.height = as.numeric(c(100,200))
 )
 
-new.dat$prob.detected <- round(predict(model.full.tmb,
+new.dat$prob.detected <- round(predict(model.full.nointer,
                         newdata = new.dat,
                         type = "response",
                         re.form = NA), digit = 2)
 
-new.dat$percent.detected <- round(100 * predict(model.full.tmb,
+new.dat$percent.detected <- round(100 * predict(model.full.nointer,
                                        newdata = new.dat,
                                        type = "response",
                                        re.form = NA), digit = 2)
 write.csv(new.dat, file = "pred_detection_probability.csv")
+
+##----------------------------------------------------
+## using the original data set fro predictions
+##----------------------------------------------------
+predictions <- predict(model.full.nointer, type = "response",
+                       newdata = master.clean)
+
+## by season
+ggplot(master.clean, aes(x = ground.height,
+                         y = predictions, color = as.factor(season))) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(title = "GLMM Predictions at average random effect",
+       x = "Ground height (cm)",
+       y = "Predicted Probability of detection",
+       color = "Season")
+
+## by species too hard to see
+ggplot(master.clean, aes(x = ground.height,
+                         y = predictions, color = as.factor(sp))) +
+  geom_point() +
+  geom_smooth(method = "glm", method.args = list(family = "binomial")) +
+  labs(title = "GLMM Predictions",
+       x = "Ground height (cm)",
+       y = "Predicted Probability of detection",
+       color = "Species")
+
+predict(model.full.nointer, type = "response",
+        newdata = list(ground.height = 100,
+                       season = "hot",
+                       sp = "1"),
+                       re.form = NA)
 
 ##--------------------------------------------------
 ## Height ground vs uav derived
