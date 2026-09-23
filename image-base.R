@@ -16,7 +16,6 @@ library(lme4)
 library(glmmTMB)
 library(SimplyAgree)
 
-
 ##-----------------------------------------------------
 ## Read data into R
 ## and clean some data points that are not
@@ -39,6 +38,7 @@ master.data <- master.data %>%
     season = as.factor(season),
     days.after = as.factor(days.after),
     no = as.factor(no),
+    id = as.factor(id)
   )
 
 ## show the order and sp ID of the missing value in the first census
@@ -104,6 +104,7 @@ print(summary_bysp, n = 30)
 hist(master.clean$ground.height)
 hist(master.clean$ca.d)
 
+max(master.clean$ground.height)
 
 model.lm <- lm(scale(ca.d) ~ scale(ground.height),
             data = master.clean)
@@ -125,58 +126,13 @@ plot(master.clean$image.detected ~ master.clean$ground.height)
 plot(master.clean$image.detected ~ master.clean$ca.d)
 
 ##-------------------------------------------------
-## Model
+## Model generalized linear mixed model
+## fixed effects = height, species, season
+## random effect = individual seedling in each bench
 ##-------------------------------------------------
-start.val <- list(theta = 0)
-
-model.full <- glmer(
-  image.detected ~ scale(ground.height) + sp + season +
-    (1 | days.after) ,
-  data = master.clean,
-  family = binomial,
-  start = start.val,
-  control = glmerControl(
-    optimizer = "nloptwrap",
-    optCtrl = list(maxfun = 2e5) # increase iterations
-  )
-) ## not converged
-
-summary(model.full)
-
-summary(model.full)$optinfo$conv$lme4
-relgrad <- with(model.full@optinfo$derivs, solve(Hessian, gradient))
-max(abs(relgrad))
-
-all_fits <- allFit(model.full)
-summary(all_fits) ## All optimizers seem to work the same way
-## that's reassuring evidence the fit is fine despite the warning.
-
-##---------------------------------------------------------
-## Run models from simpler to more complicated
-## sp seems to be the factor that led to
-## not converging
-##---------------------------------------------------------
-
-m0 <- glmer(image.detected ~ 1 + (1 | days.after),
-            data = master.clean,
-            family = binomial)
-m1 <- update(m0, . ~ . + scale(ground.height))
-m2 <- update(m1, . ~ . + season)
-m3 <- update(m2, . ~ . + sp)
-m4 <- update(m1, . ~ . + sp)
-AIC(m0, m1, m2, m3, m4)
-
-summary(m4)
-
-anova(m4, m3)
-## season doesn't need to be in the model
-
-anova(m4, m1)
-## sp seems to be in the model
-
 library(glmmTMB)
 model.full.tmb <- glmmTMB(
-  image.detected ~ scale(ground.height) + sp + season + (1 | days.after),
+  image.detected ~ scale(ground.height) + sp + season + (1 |bench/id),
   data = master.clean,
   family = binomial
 )
@@ -187,47 +143,27 @@ model.no.sp <- update(model.full.tmb, . ~ . - sp)
 model.no.height <- update(model.full.tmb, . ~ . - scale(ground.height))
 AIC(model.full.tmb, model.no.season, model.no.sp, model.no.height)
 
-##best model has height, and species.
-
-summary(model.no.season)
-anova(model.no.season, model.full.tmb)
-
-model.full.full <- glmmTMB(
-  image.detected ~ scale(ground.height) + scale(ca.d) + sp + (1 | days.after),
-  data = master.clean,
-  family = binomial
-)
-summary(model.full.full)
-
-model.ca.noheight <- glmmTMB(
-  image.detected ~ scale(ca.d) + sp + (1 | days.after),
-  data = master.clean,
-  family = binomial
-)
-summary(model.ca.noheight)
-AIC(model.full.full, model.ca.noheight)
-
-model.no.random<- glmmTMB(
-  image.detected ~ scale(ground.height) + sp + season,
-  data = master.clean,
-  family = binomial
-)
-summary(model.no.random)
+##best model has height, season, and species.
 
 ##---------------------------------------------------
 ## Model prediction
 ##---------------------------------------------------
 new.dat <- expand.grid(
-    ground.height     = seq(min(master.clean$ground.height),
-                max(master.clean$ground.height),
-                length.out = 50),
-    sp = levels(master.clean$sp)
+  season = as.factor(levels(master.clean$season)),
+  sp = as.factor(levels(master.clean$sp)),
+  ground.height = as.numeric(c(100,200))
 )
 
-new.dat$pred <- predict(model.no.season,
+new.dat$prob.detected <- round(predict(model.full.tmb,
                         newdata = new.dat,
                         type = "response",
-                        re.form = NA)
+                        re.form = NA), digit = 2)
+
+new.dat$percent.detected <- round(100 * predict(model.full.tmb,
+                                       newdata = new.dat,
+                                       type = "response",
+                                       re.form = NA), digit = 2)
+write.csv(new.dat, file = "pred_detection_probability.csv")
 
 ##--------------------------------------------------
 ## Height ground vs uav derived
@@ -236,6 +172,9 @@ height.dat <- master.data %>%
   filter(time.detected == 2)
 
 plot(height.dat$ground.height, height.dat$derived.height)
+abline(a = 0, b = 1, col = "red", lwd = 2)
+
+
 
 height.dat <-height.dat %>%
   mutate(error = derived.height - ground.height)
@@ -254,7 +193,6 @@ summary_error.bysp <- height.dat %>%
 
 print(summary_error.bysp, n = 30)
 
-
 ##-------------------------------------------------
 ## limit of agreement
 ##-------------------------------------------------
@@ -268,3 +206,49 @@ repeated <- agreement_limit(
                      id = "id",
                      data = height.dat,
                      data_type = "nest")
+
+test_tol <- tolerance_limit(x = "ground.height",
+                           y = "derived.height",
+                           data = height.dat,
+                           prop_bias = TRUE)
+plot(test_tol)
+check(test_tol)
+
+## log-transform
+test.tol.log <- tolerance_limit(
+  data = height.dat,
+  log_tf = TRUE, # natural log transformation of responses
+  x ="ground.height",
+  y = "derived.height",
+  id = "id", # Subject ID
+  condition = "days.after", # Identify condition that may affect differences
+  cor_type = "sym" # Set correlation structure as Compound Symmetry
+)
+plot(test.tol.log)
+check(test.tol.log)
+
+### prediction for 1 meter seedlings and 2 meters
+new.dat2 <- data.frame(
+  ground.height = rep(100, 30),
+  sp = as.factor(levels(master.clean$sp))
+)
+
+new.dat2$pred <- predict(model.no.season,
+                    newdata = new.dat2,
+                    type = "response",
+                    re.form = NA)
+new.dat2$pred.per  <- new.dat2$pred * 100
+
+##--------------------------------------------------
+##
+##--------------------------------------------------
+model.full.bench <- glmmTMB(
+  image.detected ~ scale(ground.height) + sp + season + (1 | bench),
+  data = master.clean,
+  family = binomial
+)
+summary(model.full.bench)
+
+model.no.season.bench <- update(model.full.bench, . ~ . - season)
+summary(model.no.season.bench)
+AIC(model.full.bench, model.no.season.bench)
